@@ -153,9 +153,11 @@ activemq-data/
 .venv
 env/
 venv/
+venvdata522/
 ENV/
 env.bak/
 venv.bak/
+
 
 # Spyder project settings
 .spyderproject
@@ -216,3 +218,19 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# FinRAG - Data files --> too large to push on github
+data/raw/
+data/processed/
+data/embeddings/
+data/extracted/
+*.pdf
+*.csv
+
+# Vector store indexes
+*.index
+*.faiss
+
+# OS
+.DS_Store
+Thumbs.db
