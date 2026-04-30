@@ -219,13 +219,6 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# FinRAG - Data files --> too large to push on github
-data/raw/
-data/processed/
-data/embeddings/
-data/extracted/
-*.pdf
-*.csv
 
 # Vector store indexes
 *.index

@@ -198,44 +198,21 @@ def parse_html_filename(filename: str) -> tuple:
 def process_direct_html(html_path: Path):
     """
     Process a plain HTML filing dropped directly into data/raw/.
-    Writes the same outputs as process_filing() so the chunker pipeline
-    can pick them up from data/processed/ and data/extracted/.
+    Copies the file to data/processed/ with a standardised name so the
+    chunker can discover it via TICKER_DOCTYPE_PERIOD.html naming.
     """
     ticker, doc_type, period = parse_html_filename(html_path.name)
-    logger.info(f"  Direct HTML: {html_path.name} → {ticker}/{doc_type}/{period}")
+    logger.info(f"  Direct HTML: {html_path.name} -> {ticker}/{doc_type}/{period}")
 
+    out_html = PROCESSED_DIR / f"{ticker}_{doc_type}_{period}.html"
     try:
-        html_content = html_path.read_text(encoding="utf-8", errors="replace")
+        out_html.write_bytes(html_path.read_bytes())
     except Exception as e:
-        logger.error(f"    Could not read file: {e}")
+        logger.error(f"    Could not copy file: {e}")
         return None
 
-    plain_text = html_to_plain_text(html_content)
-    word_count = len(plain_text.split())
-    char_count = len(plain_text)
-
-    stem     = f"{ticker}_{doc_type}_{period}"
-    out_txt  = EXTRACTED_DIR / f"{stem}.txt"
-    out_json = EXTRACTED_DIR / f"{stem}.json"
-    out_html = PROCESSED_DIR / f"{stem}.html"
-
-    out_txt.write_text(plain_text, encoding="utf-8")
-    out_html.write_text(html_content, encoding="utf-8")
-
-    metadata = {
-        "ticker":      ticker,
-        "doc_type":    doc_type,
-        "accession":   period,
-        "period":      period,
-        "source_file": str(html_path),
-        "word_count":  word_count,
-        "char_count":  char_count,
-        "was_html":    True,
-    }
-    out_json.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
-
-    logger.info(f"    Saved: {out_txt.name} ({word_count:,} words)  →  {out_html.name}")
-    return metadata
+    logger.info(f"    Saved: {out_html.name}")
+    return {"ticker": ticker, "doc_type": doc_type, "period": period}
 
 
 # ── Per-filing processing ──────────────────────────────────────────────────────
@@ -310,14 +287,13 @@ def process_filing(ticker: str, doc_type: str, accession: str, submission_path: 
 # ── Main batch loop ────────────────────────────────────────────────────────────
 
 def main():
-    EXTRACTED_DIR.mkdir(parents=True, exist_ok=True)
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 
-    manifest = []
     total, success, failed = 0, 0, 0
 
     # --- Path 1: EDGAR full-submission.txt directory tree ---
     if RAW_DIR.exists():
+        EXTRACTED_DIR.mkdir(parents=True, exist_ok=True)
         for ticker_dir in sorted(RAW_DIR.iterdir()):
             if not ticker_dir.is_dir():
                 continue
@@ -339,32 +315,18 @@ def main():
 
                     total += 1
                     result = process_filing(ticker, doc_type, accession_dir.name, submission_file)
-
-                    if result:
-                        manifest.append(result)
-                        success += 1
-                    else:
-                        failed += 1
+                    success += 1 if result else 0
+                    failed  += 0 if result else 1
 
     # --- Path 2: Plain HTML files dropped directly into data/raw/ ---
     for html_file in sorted(RAW_BASE.glob("*.html")):
         total += 1
         result = process_direct_html(html_file)
-        if result:
-            manifest.append(result)
-            success += 1
-        else:
-            failed += 1
-
-    manifest_path = EXTRACTED_DIR / "_manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        success += 1 if result else 0
+        failed  += 0 if result else 1
 
     logger.info(f"\n{'='*50}")
-    logger.info(f"Extraction complete.")
-    logger.info(f"  Total filings : {total}")
-    logger.info(f"  Successful    : {success}")
-    logger.info(f"  Failed        : {failed}")
-    logger.info(f"  Manifest      : {manifest_path}")
+    logger.info(f"Extraction complete: {success}/{total} filings processed.")
 
 
 if __name__ == "__main__":

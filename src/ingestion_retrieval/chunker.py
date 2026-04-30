@@ -67,7 +67,6 @@ TICKER_TO_COMPANY = {
 }
 
 PROCESSED_DIR = PROJECT_ROOT / "data/processed"
-EXTRACTED_DIR = PROJECT_ROOT / "data/extracted"
 
 
 def discover_documents() -> list[tuple]:
@@ -85,15 +84,8 @@ def discover_documents() -> list[tuple]:
         if len(parts) != 3:
             print(f"  [!] Skipping {html_file.name} — expected TICKER_DOCTYPE_ACCESSION.html")
             continue
-        ticker, doc_type, _ = parts
+        ticker, doc_type, period = parts
         company = TICKER_TO_COMPANY.get(ticker.upper(), ticker)
-
-        json_path = EXTRACTED_DIR / f"{html_file.stem}.json"
-        period = "Unknown"
-        if json_path.exists():
-            with open(json_path) as f:
-                period = json.load(f).get("period", "Unknown")
-
         docs.append((company, doc_type, period, str(html_file)))
     return docs
 
