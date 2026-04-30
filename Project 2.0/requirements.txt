@@ -1,0 +1,9 @@
+edgartools
+chromadb
+duckdb
+sentence-transformers
+google-genai
+openai
+rich
+python-dotenv
+langchain-text-splitters
