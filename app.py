@@ -6,8 +6,20 @@ Run from project root:
 """
 
 import sys
+import base64
 from pathlib import Path
 import streamlit as st
+
+_LOGOS_DIR = Path(__file__).resolve().parent / "assets" / "logos"
+
+def _load_logo(filename: str) -> str:
+    """Return a base64 data URI for a logo file, or empty string if not found."""
+    p = _LOGOS_DIR / filename
+    if not p.exists():
+        return ""
+    ext = p.suffix.lower()
+    mime = "image/svg+xml" if ext == ".svg" else "image/png" if ext == ".png" else "image/jpeg"
+    return f"data:{mime};base64,{base64.b64encode(p.read_bytes()).decode()}"
 
 # ── Path setup ─────────────────────────────────────────────────────────────────
 sys.path.append(str(Path(__file__).resolve().parent / "src" / "generation"))
@@ -24,14 +36,14 @@ st.set_page_config(
 # ── Custom CSS ─────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,600;0,700;1,400;1,600&family=Inter:wght@300;400;500;600&family=IBM+Plex+Mono:wght@300;400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Figtree:wght@300;400;500;600;700;800&family=DM+Serif+Display:ital@0;1&family=DM+Mono:wght@300;400;500&family=DM+Sans:wght@300;400;500;600&display=swap');
 
 /* ── Reset & base ── */
 *, *::before, *::after { box-sizing: border-box; }
 
 .stApp {
     background: #0a0c0f;
-    font-family: 'Inter', sans-serif;
+    font-family: 'DM Sans', sans-serif;
 }
 
 /* Hide default Streamlit chrome */
@@ -100,7 +112,7 @@ st.markdown("""
 }
 
 .logo-label {
-    font-family: 'IBM Plex Mono', monospace;
+    font-family: 'DM Mono', monospace;
     font-size: 0.65rem;
     color: #3b82f6;
     letter-spacing: 0.1em;
@@ -108,11 +120,12 @@ st.markdown("""
 }
 
 .logo-title {
-    font-family: 'Playfair Display', serif;
+    font-family: 'Figtree', sans-serif;
     font-size: 2rem;
+    font-weight: 600;
     color: #f0f4f8;
     line-height: 1.1;
-    letter-spacing: -0.02em;
+    letter-spacing: -0.01em;
 }
 
 .logo-title em {
@@ -147,7 +160,7 @@ st.markdown("""
 .stat-label {
     font-size: 0.72rem;
     color: #4a5568;
-    font-family: 'IBM Plex Mono', monospace;
+    font-family: 'DM Mono', monospace;
     text-transform: uppercase;
     letter-spacing: 0.05em;
 }
@@ -160,7 +173,7 @@ st.markdown("""
 
 /* ── Corpus section ── */
 .corpus-title {
-    font-family: 'IBM Plex Mono', monospace;
+    font-family: 'DM Mono', monospace;
     font-size: 0.65rem;
     color: #4a5568;
     text-transform: uppercase;
@@ -182,11 +195,18 @@ st.markdown("""
 
 .company-pill:hover { border-color: #2a3a50; }
 
-.company-color {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
+.company-badge {
+    width: 26px;
+    height: 26px;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.62rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
     flex-shrink: 0;
+    font-family: 'DM Sans', sans-serif;
 }
 
 .company-name {
@@ -199,12 +219,12 @@ st.markdown("""
     font-size: 0.7rem;
     color: #4a5568;
     margin-left: auto;
-    font-family: 'IBM Plex Mono', monospace;
+    font-family: 'DM Mono', monospace;
 }
 
 /* ── Suggested questions ── */
 .suggest-title {
-    font-family: 'IBM Plex Mono', monospace;
+    font-family: 'DM Mono', monospace;
     font-size: 0.65rem;
     color: #4a5568;
     text-transform: uppercase;
@@ -225,7 +245,7 @@ st.markdown("""
 }
 
 .hero-eyebrow {
-    font-family: 'IBM Plex Mono', monospace;
+    font-family: 'DM Mono', monospace;
     font-size: 0.7rem;
     color: #3b82f6;
     text-transform: uppercase;
@@ -234,11 +254,12 @@ st.markdown("""
 }
 
 .hero-heading {
-    font-family: 'Playfair Display', serif;
+    font-family: 'Figtree', sans-serif;
     font-size: 2.8rem;
+    font-weight: 700;
     color: #f0f4f8;
     line-height: 1.15;
-    letter-spacing: -0.03em;
+    letter-spacing: -0.02em;
     margin-bottom: 1rem;
 }
 
@@ -254,34 +275,37 @@ st.markdown("""
 }
 
 /* ── Input area ── */
-.input-wrapper {
-    background: #0d1017;
-    border: 1px solid #1e2530;
-    border-radius: 14px;
-    padding: 1.5rem;
-    margin-bottom: 2rem;
-    position: relative;
+.stTextArea {
+    margin-bottom: 1rem;
 }
 
-.input-wrapper:focus-within {
-    border-color: #3b82f6;
-    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.08);
+/* Style the BaseWeb wrapper (the actual visible box) */
+.stTextArea [data-baseweb="textarea"] {
+    background: #0d1017 !important;
+    border: 1px solid #1e2530 !important;
+    border-radius: 14px !important;
+}
+
+.stTextArea [data-baseweb="textarea"]:focus-within {
+    border-color: #3b82f6 !important;
+    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.08) !important;
 }
 
 /* Override Streamlit text area */
 .stTextArea textarea {
     background: transparent !important;
     border: none !important;
+    outline: none !important;
     color: #e2e8f0 !important;
-    font-family: 'Inter', sans-serif !important;
+    font-family: 'DM Sans', sans-serif !important;
     font-size: 1rem !important;
     resize: none !important;
     box-shadow: none !important;
-    padding: 0 !important;
+    padding: 0.75rem 1rem !important;
 }
 
-.stTextArea textarea::placeholder { color: #2d3748 !important; }
-.stTextArea textarea:focus { box-shadow: none !important; border: none !important; }
+.stTextArea textarea::placeholder { color: #4a5568 !important; }
+.stTextArea textarea:focus { outline: none !important; box-shadow: none !important; border: none !important; }
 
 /* ── Button ── */
 .stButton > button {
@@ -290,7 +314,7 @@ st.markdown("""
     border: none !important;
     border-radius: 10px !important;
     padding: 0.7rem 2rem !important;
-    font-family: 'Inter', sans-serif !important;
+    font-family: 'DM Sans', sans-serif !important;
     font-size: 0.9rem !important;
     font-weight: 600 !important;
     letter-spacing: 0.01em !important;
@@ -350,7 +374,7 @@ st.markdown("""
 }
 
 .answer-label {
-    font-family: 'IBM Plex Mono', monospace;
+    font-family: 'DM Mono', monospace;
     font-size: 0.65rem;
     color: #3b82f6;
     text-transform: uppercase;
@@ -366,7 +390,7 @@ st.markdown("""
 
 /* ── Sources section ── */
 .sources-header {
-    font-family: 'IBM Plex Mono', monospace;
+    font-family: 'DM Mono', monospace;
     font-size: 0.65rem;
     color: #4a5568;
     text-transform: uppercase;
@@ -401,7 +425,7 @@ st.markdown("""
 .source-card:hover { border-color: #2a3a50; }
 
 .source-num {
-    font-family: 'IBM Plex Mono', monospace;
+    font-family: 'DM Mono', monospace;
     font-size: 0.7rem;
     color: #3b82f6;
     background: rgba(59, 130, 246, 0.1);
@@ -425,12 +449,12 @@ st.markdown("""
 .source-preview {
     font-size: 0.75rem;
     color: #4a5568;
-    font-family: 'IBM Plex Mono', monospace;
+    font-family: 'DM Mono', monospace;
     line-height: 1.5;
 }
 
 .source-score {
-    font-family: 'IBM Plex Mono', monospace;
+    font-family: 'DM Mono', monospace;
     font-size: 0.7rem;
     color: #4a5568;
     white-space: nowrap;
@@ -442,7 +466,7 @@ st.markdown("""
 
 .type-badge {
     display: inline-block;
-    font-family: 'IBM Plex Mono', monospace;
+    font-family: 'DM Mono', monospace;
     font-size: 0.6rem;
     padding: 0.15rem 0.4rem;
     border-radius: 4px;
@@ -498,7 +522,7 @@ st.markdown("""
 
 /* ── Question display ── */
 .question-display {
-    font-family: 'Playfair Display', serif;
+    font-family: 'DM Serif Display', serif;
     font-size: 1.4rem;
     color: #e2e8f0;
     margin-bottom: 1.5rem;
@@ -528,9 +552,9 @@ SUGGESTED = [
 ]
 
 COMPANIES = [
-    {"name": "Apple", "docs": "10-K · 10-Q", "color": "#a8c7fa"},
-    {"name": "Tesla", "docs": "10-K · 10-Q", "color": "#f28b82"},
-    {"name": "JPMorgan", "docs": "10-K · 10-Q", "color": "#81c995"},
+    {"name": "Apple",    "docs": "10-K · 10-Q", "badge": "A",  "bg": "#1d1d1f", "fg": "#f5f5f7", "logo": _load_logo("apple.png")},
+    {"name": "Tesla",    "docs": "10-K · 10-Q", "badge": "T",  "bg": "#cc0000", "fg": "#ffffff",  "logo": _load_logo("tesla.png")},
+    {"name": "JPMorgan", "docs": "10-K · 10-Q", "badge": "JP", "bg": "#003087", "fg": "#ffffff",  "logo": _load_logo("jpmorgan.png")},
 ]
 
 
@@ -568,9 +592,12 @@ with left:
     # Corpus
     st.markdown('<div class="corpus-title">Corpus</div>', unsafe_allow_html=True)
     for c in COMPANIES:
+        icon = (f'<img src="{c["logo"]}" style="width:24px;height:24px;border-radius:5px;object-fit:contain;flex-shrink:0">'
+                if c["logo"] else
+                f'<div class="company-badge" style="background:{c["bg"]};color:{c["fg"]}">{c["badge"]}</div>')
         st.markdown(f"""
         <div class="company-pill">
-            <div class="company-color" style="background:{c['color']}"></div>
+            {icon}
             <span class="company-name">{c['name']}</span>
             <span class="company-docs">{c['docs']}</span>
         </div>
@@ -585,6 +612,13 @@ with left:
             st.markdown('<div class="suggest-btn">', unsafe_allow_html=True)
             if st.button(q, key=f"suggest_{q[:20]}"):
                 st.session_state.query = q
+                with st.spinner("Retrieving and generating answer..."):
+                    try:
+                        _, answer_fn = load_resources()
+                        st.session_state.result = answer_fn(q, top_k=5)
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+                        st.session_state.result = None
                 st.rerun()
             st.markdown('</div>', unsafe_allow_html=True)
 
@@ -625,7 +659,6 @@ with right:
     """, unsafe_allow_html=True)
 
     # Input
-    st.markdown('<div class="input-wrapper">', unsafe_allow_html=True)
     query_input = st.text_area(
         label="",
         value=st.session_state.query,
@@ -637,7 +670,6 @@ with right:
     col_btn1, col_btn2 = st.columns([3, 1])
     with col_btn2:
         ask_clicked = st.button("Ask FinRAG →", type="primary", use_container_width=True)
-    st.markdown('</div>', unsafe_allow_html=True)
 
     # Run query
     if ask_clicked and query_input.strip():

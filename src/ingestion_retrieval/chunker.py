@@ -14,7 +14,8 @@ import re
 import uuid
 import json
 import argparse
-import requests
+import tempfile
+import os
 import numpy as np
 from pathlib import Path
 from datetime import datetime, timezone
@@ -28,7 +29,6 @@ from unstructured.documents.elements import (
     Header, Footer, Text
 )
 from sentence_transformers import SentenceTransformer
-from extract_text import extract_primary_document
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 
@@ -66,58 +66,35 @@ TICKER_TO_COMPANY = {
     "JPM":  "JPMorgan",
 }
 
-RAW_DIR = PROJECT_ROOT / "data/raw/sec-edgar-filings"
-
-
-def _read_period_date(submission: Path) -> str:
-    """Read CONFORMED PERIOD OF REPORT from the SEC header (e.g. '20250331')."""
-    try:
-        with open(submission, encoding="utf-8", errors="replace") as f:
-            for line in f:
-                if "CONFORMED PERIOD OF REPORT" in line:
-                    return line.split(":")[-1].strip()
-                if line.startswith("<DOCUMENT>"):
-                    break
-    except Exception:
-        pass
-    return ""
-
-
-def _period_label(date_str: str, doc_type: str) -> str:
-    """Convert a raw YYYYMMDD date string to a human period label."""
-    if len(date_str) == 8:
-        year  = int(date_str[:4])
-        month = int(date_str[4:6])
-        if doc_type == "10-K":
-            return f"FY{year}"
-        quarter = (month - 1) // 3 + 1
-        return f"Q{quarter}-{year}"
-    return "Unknown"
+PROCESSED_DIR = PROJECT_ROOT / "data/processed"
+EXTRACTED_DIR = PROJECT_ROOT / "data/extracted"
 
 
 def discover_documents() -> list[tuple]:
     """
-    Auto-discover all filings from data/raw/sec-edgar-filings/.
-    Returns a list of (company, doc_type, period, path_to_full-submission.txt).
+    Auto-discover all filings from data/processed/*.html.
+    Filename format: {TICKER}_{DOCTYPE}_{ACCESSION}.html  (written by extract_text.py)
+    Period is read from the companion JSON in data/extracted/.
+    Returns a list of (company, doc_type, period, path_to_html).
     """
     docs = []
-    if not RAW_DIR.exists():
+    if not PROCESSED_DIR.exists():
         return docs
-    for ticker_dir in sorted(RAW_DIR.iterdir()):
-        if not ticker_dir.is_dir():
+    for html_file in sorted(PROCESSED_DIR.glob("*.html")):
+        parts = html_file.stem.split("_", 2)
+        if len(parts) != 3:
+            print(f"  [!] Skipping {html_file.name} — expected TICKER_DOCTYPE_ACCESSION.html")
             continue
-        company = TICKER_TO_COMPANY.get(ticker_dir.name.upper(), ticker_dir.name)
-        for doctype_dir in sorted(ticker_dir.iterdir()):
-            if not doctype_dir.is_dir():
-                continue
-            doc_type = doctype_dir.name.upper()
-            for accession_dir in sorted(doctype_dir.iterdir()):
-                submission = accession_dir / "full-submission.txt"
-                if not submission.exists():
-                    continue
-                date_str = _read_period_date(submission)
-                period   = _period_label(date_str, doc_type)
-                docs.append((company, doc_type, period, str(submission)))
+        ticker, doc_type, _ = parts
+        company = TICKER_TO_COMPANY.get(ticker.upper(), ticker)
+
+        json_path = EXTRACTED_DIR / f"{html_file.stem}.json"
+        period = "Unknown"
+        if json_path.exists():
+            with open(json_path) as f:
+                period = json.load(f).get("period", "Unknown")
+
+        docs.append((company, doc_type, period, str(html_file)))
     return docs
 
 # ── HTML CLEANING ──────────────────────────────────────────────────────────────
@@ -125,71 +102,63 @@ def discover_documents() -> list[tuple]:
 def clean_sec_html(html: str) -> str:
     """
     Strip EDGAR-specific noise before passing to unstructured:
-      - Inline XBRL tags (ix:*) — unwrapped, text preserved
-      - Hidden elements (display:none)
-      - Empty tags
-      - Boilerplate navigation / cover page repetition
+      - EDGAR Online efx_* proprietary container tags (replaced with <div>)
+      - display:none blocks (XBRL context data embedded in the document)
+      - Script / style / meta / link tags
     """
+    # Replace EDGAR Online's custom efx_* tags with generic <div> before BS
+    # parsing — these wrap all section content and confuse partition_html.
+    html = re.sub(
+        r"<(/?)efx_[a-zA-Z_0-9]+([^>]*?)>",
+        lambda m: "<" + m.group(1) + "div" + m.group(2) + ">",
+        html,
+        flags=re.IGNORECASE,
+    )
+
+    # Remove display:none blocks (XBRL context data injected by the viewer)
+    html = re.sub(
+        r"<div[^>]*style=[^>]*display\s*:\s*none[^>]*>.*?</div>",
+        "",
+        html,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+
     soup = BeautifulSoup(html, "html.parser")
-
-    # Unwrap XBRL inline tags — keep their text content
-    for tag in soup.find_all(re.compile(r"^ix:")):
-        tag.unwrap()
-
-    # Remove hidden elements
-    for tag in soup.find_all(
-        style=lambda s: s and "display:none" in s.replace(" ", "").lower()
-    ):
-        tag.decompose()
-
-    # Remove script / style blocks
     for tag in soup.find_all(["script", "style", "meta", "link"]):
         tag.decompose()
-
-    # Remove empty tags
-    for tag in soup.find_all():
-        if not tag.get_text(strip=True) and tag.name not in ["br", "hr", "img"]:
-            tag.decompose()
 
     return str(soup)
 
 
 # ── DOCUMENT LOADING ───────────────────────────────────────────────────────────
 
-def load_html(source: str, doc_type: str = "") -> str:
-    """Load HTML from a URL, a plain .htm file, or an EDGAR full-submission.txt container."""
-    if source.startswith("http://") or source.startswith("https://"):
-        print(f"  Fetching from URL: {source[:80]}...")
-        headers = {"User-Agent": CONFIG["sec_user_agent"]}
-        resp = requests.get(source, headers=headers, timeout=30)
-        resp.raise_for_status()
-        return resp.text
-
+def load_html(source: str) -> str:
+    """Load HTML from a local .html file."""
     path = Path(source)
     if not path.exists():
         raise FileNotFoundError(f"File not found: {source}")
-    print(f"  Reading: {source}")
-    content = path.read_text(encoding="utf-8", errors="replace")
-
-    if path.name == "full-submission.txt" and doc_type:
-        html = extract_primary_document(content, doc_type)
-        if html is None or len(html) < 500:
-            raise ValueError(f"Extracted HTML looks empty or missing for {doc_type} in {source}")
-        # iXBRL filings wrap HTML inside <XBRL>...</XBRL> — strip the outer wrapper
-        if re.match(r"\s*<XBRL", html, re.IGNORECASE):
-            inner = re.search(r"(<html[\s>].*</html>)", html, re.DOTALL | re.IGNORECASE)
-            if inner:
-                html = inner.group(1)
-        return html
-    return content
+    print(f"  Reading: {path.name}")
+    return path.read_text(encoding="utf-8", errors="replace")
 
 
 # ── ELEMENT-BASED STRUCTURAL CHUNKING ─────────────────────────────────────────
 
 def extract_elements(html: str):
-    """Run unstructured element detection on cleaned HTML."""
+    """
+    Run unstructured element detection on cleaned HTML.
+    Uses a temp file because partition_html(text=...) silently returns
+    nothing for large documents; partition_html(filename=...) does not.
+    """
     cleaned = clean_sec_html(html)
-    elements = partition_html(text=cleaned)
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".html", encoding="utf-8", delete=False
+    ) as f:
+        f.write(cleaned)
+        tmpfile = f.name
+    try:
+        elements = partition_html(filename=tmpfile)
+    finally:
+        os.unlink(tmpfile)
     return elements
 
 
@@ -202,9 +171,9 @@ def chunk_elements(
 ) -> list[dict]:
     """
     Implement the element-based merging logic from Jimeno Yepes et al.:
-      - Title  → always flush current buffer, start new chunk
-      - Table  → always its own standalone chunk (never merged)
-      - Text / List → merge until MAX_CHARS, then flush
+      - Title  -> always flush current buffer, start new chunk
+      - Table  -> always its own standalone chunk (never merged)
+      - Text / List -> merge until MAX_CHARS, then flush
     Each chunk gets a rich metadata dict.
     """
     max_chars = CONFIG["max_chars"]
@@ -247,6 +216,13 @@ def chunk_elements(
             # Tables always get their own chunk — never merged with text
             flush(page)
             table_text = str(el).strip()
+            if any(p in table_text.lower() for p in (
+                "see accompanying notes",
+                "notes to consolidated financial statements",
+                "notes to condensed consolidated",
+                "the accompanying notes are an integral part",
+            )):
+                continue
             if len(table_text) >= min_chars:
                 chunks.append(_make_chunk(
                     text=table_text,
@@ -265,6 +241,15 @@ def chunk_elements(
         elif isinstance(el, (NarrativeText, ListItem, Header)):
             el_text = str(el).strip()
             if not el_text:
+                continue
+
+            # Skip boilerplate cross-reference lines that add no financial content
+            if any(p in el_text.lower() for p in (
+                "see accompanying notes",
+                "notes to consolidated financial statements",
+                "notes to condensed consolidated",
+                "the accompanying notes are an integral part",
+            )):
                 continue
 
             # Would adding this element exceed max_chars?
@@ -389,7 +374,7 @@ def build_faiss_index(embeddings: np.ndarray, chunks: list[dict], index_name: st
     with open(index_dir / "chunks.json", "w") as f:
         json.dump(chunks, f, indent=2)
 
-    print(f"  FAISS index saved → {index_dir}  ({index.ntotal} vectors, dim={dim})")
+    print(f"  FAISS index saved -> {index_dir}  ({index.ntotal} vectors, dim={dim})")
     return index
 
 
@@ -430,7 +415,7 @@ def build_chroma_index(embeddings: np.ndarray, chunks: list[dict], index_name: s
         metadatas=[c["metadata"] for c in chunks],
     )
 
-    print(f"  ChromaDB collection saved → {CONFIG['index_dir']}/{index_name}  ({len(chunks)} docs)")
+    print(f"  ChromaDB collection saved -> {CONFIG['index_dir']}/{index_name}  ({len(chunks)} docs)")
     return collection
 
 
@@ -473,7 +458,7 @@ def save_chunks_json(chunks: list[dict], name: str):
     path = out_dir / f"{name}.json"
     with open(path, "w") as f:
         json.dump(chunks, f, indent=2)
-    print(f"  Raw chunks saved → {path}")
+    print(f"  Raw chunks saved -> {path}")
 
 
 # ── MAIN PIPELINE ──────────────────────────────────────────────────────────────
@@ -482,7 +467,7 @@ def run_pipeline(inspect_only: bool = False, build_baseline: bool = False):
     # NOTE: intentionally "or" not "+"; combining both would index the same filing twice.
     docs = CONFIG["documents"] or discover_documents()
     if not docs:
-        print("\n[!] No documents found in data/raw/sec-edgar-filings/ and none configured.\n")
+        print("\n[!] No documents found in data/processed/. Run extract_text.py first.\n")
         return
 
     if not inspect_only:
@@ -514,7 +499,7 @@ def run_pipeline(inspect_only: bool = False, build_baseline: bool = False):
         print(f"\n[{source_id}]")
 
         try:
-            html = load_html(source, doc_type)
+            html = load_html(source)
         except Exception as e:
             print(f"  ERROR loading document: {e}")
             continue
@@ -526,7 +511,7 @@ def run_pipeline(inspect_only: bool = False, build_baseline: bool = False):
         print(f"  Elements found: {dict(type_counts)}")
 
         chunks = chunk_elements(elements, company, doc_type, period, source_id)
-        print(f"  → {len(chunks)} structural chunks")
+        print(f"  -> {len(chunks)} structural chunks")
         all_chunks.extend(chunks)
         save_chunks_json(chunks, source_id)
 
@@ -538,7 +523,7 @@ def run_pipeline(inspect_only: bool = False, build_baseline: bool = False):
                 chunk_tokens=CONFIG["baseline_chunk_tokens"],
                 overlap_tokens=CONFIG["baseline_overlap_tokens"],
             )
-            print(f"  → {len(baseline)} baseline chunks (fixed-512)")
+            print(f"  -> {len(baseline)} baseline chunks (fixed-512)")
             all_baseline_chunks.extend(baseline)
 
     if not all_chunks:
@@ -570,7 +555,7 @@ def run_pipeline(inspect_only: bool = False, build_baseline: bool = False):
         else:
             build_chroma_index(baseline_embeddings, all_baseline_chunks, "finrag_baseline")
 
-    print("\n✓ Pipeline complete.\n")
+    print("\nPipeline complete.\n")
 
 
 # ── RETRIEVAL HELPER (used by the RAG query layer) ─────────────────────────────
@@ -594,7 +579,7 @@ def retrieve(
 
     if CONFIG["vector_store"] == "faiss":
         index, chunks = load_faiss_index(index_name)
-        scores, indices = index.search(query_vec, top_k * 3)  # over-fetch for filtering
+        scores, indices = index.search(query_vec, top_k * 10)  # over-fetch for filtering
         results = []
         for score, idx in zip(scores[0], indices[0]):
             if idx == -1:

@@ -32,9 +32,19 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ── Paths (relative to project root) ──────────────────────────────────────────
-RAW_DIR       = Path("data/raw/sec-edgar-filings")
-EXTRACTED_DIR = Path("data/extracted")
+# ── Paths (absolute, anchored to project root) ────────────────────────────────
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+RAW_DIR       = _PROJECT_ROOT / "data/raw/sec-edgar-filings"
+RAW_BASE      = _PROJECT_ROOT / "data/raw"
+EXTRACTED_DIR = _PROJECT_ROOT / "data/extracted"
+PROCESSED_DIR = _PROJECT_ROOT / "data/processed"
+
+COMPANY_TO_TICKER = {
+    "apple":     "AAPL",
+    "tesla":     "TSLA",
+    "jpmorgan":  "JPM",
+    "jp morgan": "JPM",
+}
 
 
 # ── EDGAR document extraction ──────────────────────────────────────────────────
@@ -114,6 +124,120 @@ def is_html(content: str) -> bool:
     return bool(re.search(r"<html|<HTML|<body|<BODY|<table|<TABLE", content))
 
 
+def _read_period_date(submission_path: Path) -> str:
+    """Read CONFORMED PERIOD OF REPORT from the SEC header (e.g. '20250331')."""
+    try:
+        with open(submission_path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if "CONFORMED PERIOD OF REPORT" in line:
+                    return line.split(":")[-1].strip()
+                if line.startswith("<DOCUMENT>"):
+                    break
+    except Exception:
+        pass
+    return ""
+
+
+def _period_label(date_str: str, doc_type: str) -> str:
+    """Convert YYYYMMDD to a human period label like FY2024 or Q1-2025."""
+    if len(date_str) == 8:
+        year  = int(date_str[:4])
+        month = int(date_str[4:6])
+        if doc_type == "10-K":
+            return f"FY{year}"
+        quarter = (month - 1) // 3 + 1
+        return f"Q{quarter}-{year}"
+    return "Unknown"
+
+
+# ── Direct HTML processing (files dropped into data/raw/*.html) ───────────────
+
+def parse_html_filename(filename: str) -> tuple:
+    """
+    Infer (ticker, doc_type, period) from filenames like:
+      'Apple Inc. (Form_ 10-K_FY2025, Received_ ...)'
+      'Apple Inc. (Form_ 10-Q_Q2FY2026, Received_ ...)'
+      'Apple Inc. (Form_ 10-Q, Period_ 2026-03-29, Received_ ...)'
+    Returns ("UNKNOWN", "10-K", "Unknown") for unrecognised patterns.
+    """
+    name = filename.lower()
+
+    ticker = "UNKNOWN"
+    for company, t in COMPANY_TO_TICKER.items():
+        if company in name:
+            ticker = t
+            break
+
+    doc_type = "10-Q" if ("10-q" in name or "10_q" in name) else "10-K"
+
+    # Q{n}FY{year} — e.g. Q2FY2026 (most common EDGAR Online 10-Q format)
+    qfy = re.search(r"q(\d)fy(\d{4})", name)
+    # Q{n}-{year} or Q{n}_{year} — e.g. Q2-2025
+    qdash = re.search(r"q(\d)[_\-](\d{4})", name)
+    # Period_ YYYY-MM-DD — derive quarter from month
+    period_date = re.search(r"period[_\s]+(\d{4})-(\d{2})-\d{2}", name)
+    # FY{year} — annual filing fallback
+    fy = re.search(r"fy(\d{4})", name)
+
+    if qfy:
+        period = f"Q{qfy.group(1)}-{qfy.group(2)}"
+    elif qdash:
+        period = f"Q{qdash.group(1)}-{qdash.group(2)}"
+    elif period_date:
+        year    = int(period_date.group(1))
+        quarter = (int(period_date.group(2)) - 1) // 3 + 1
+        period  = f"Q{quarter}-{year}"
+    elif fy:
+        period = f"FY{fy.group(1)}"
+    else:
+        period = "Unknown"
+
+    return ticker, doc_type, period
+
+
+def process_direct_html(html_path: Path):
+    """
+    Process a plain HTML filing dropped directly into data/raw/.
+    Writes the same outputs as process_filing() so the chunker pipeline
+    can pick them up from data/processed/ and data/extracted/.
+    """
+    ticker, doc_type, period = parse_html_filename(html_path.name)
+    logger.info(f"  Direct HTML: {html_path.name} → {ticker}/{doc_type}/{period}")
+
+    try:
+        html_content = html_path.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:
+        logger.error(f"    Could not read file: {e}")
+        return None
+
+    plain_text = html_to_plain_text(html_content)
+    word_count = len(plain_text.split())
+    char_count = len(plain_text)
+
+    stem     = f"{ticker}_{doc_type}_{period}"
+    out_txt  = EXTRACTED_DIR / f"{stem}.txt"
+    out_json = EXTRACTED_DIR / f"{stem}.json"
+    out_html = PROCESSED_DIR / f"{stem}.html"
+
+    out_txt.write_text(plain_text, encoding="utf-8")
+    out_html.write_text(html_content, encoding="utf-8")
+
+    metadata = {
+        "ticker":      ticker,
+        "doc_type":    doc_type,
+        "accession":   period,
+        "period":      period,
+        "source_file": str(html_path),
+        "word_count":  word_count,
+        "char_count":  char_count,
+        "was_html":    True,
+    }
+    out_json.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+
+    logger.info(f"    Saved: {out_txt.name} ({word_count:,} words)  →  {out_html.name}")
+    return metadata
+
+
 # ── Per-filing processing ──────────────────────────────────────────────────────
 
 def process_filing(ticker: str, doc_type: str, accession: str, submission_path: Path):
@@ -149,17 +273,29 @@ def process_filing(ticker: str, doc_type: str, accession: str, submission_path: 
     word_count = len(plain_text.split())
     char_count = len(plain_text)
 
+    period = _period_label(_read_period_date(submission_path), doc_type)
+
+    # iXBRL filings wrap the HTML inside <XBRL>...</XBRL> — extract the inner HTML
+    html_for_chunker = primary_doc
+    if re.match(r"\s*<XBRL", primary_doc, re.IGNORECASE):
+        inner = re.search(r"(<html[\s>].*</html>)", primary_doc, re.DOTALL | re.IGNORECASE)
+        if inner:
+            html_for_chunker = inner.group(1)
+
     # Output filename: AAPL_10-K_0000320193-24-000123
     stem     = f"{ticker}_{doc_type}_{accession}"
     out_txt  = EXTRACTED_DIR / f"{stem}.txt"
     out_json = EXTRACTED_DIR / f"{stem}.json"
+    out_html = PROCESSED_DIR / f"{stem}.html"
 
     out_txt.write_text(plain_text, encoding="utf-8")
+    out_html.write_text(html_for_chunker, encoding="utf-8")
 
     metadata = {
         "ticker":      ticker,
         "doc_type":    doc_type,
         "accession":   accession,
+        "period":      period,
         "source_file": str(submission_path),
         "word_count":  word_count,
         "char_count":  char_count,
@@ -167,7 +303,7 @@ def process_filing(ticker: str, doc_type: str, accession: str, submission_path: 
     }
     out_json.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
-    logger.info(f"    Saved: {out_txt.name} ({word_count:,} words)")
+    logger.info(f"    Saved: {out_txt.name} ({word_count:,} words)  →  {out_html.name}")
     return metadata
 
 
@@ -175,42 +311,50 @@ def process_filing(ticker: str, doc_type: str, accession: str, submission_path: 
 
 def main():
     EXTRACTED_DIR.mkdir(parents=True, exist_ok=True)
-
-    if not RAW_DIR.exists():
-        logger.error(f"Raw directory not found: {RAW_DIR}")
-        return
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 
     manifest = []
     total, success, failed = 0, 0, 0
 
-    # Walk: sec-edgar-filings/<TICKER>/<DOC_TYPE>/<ACCESSION>/full-submission.txt
-    for ticker_dir in sorted(RAW_DIR.iterdir()):
-        if not ticker_dir.is_dir():
-            continue
-        ticker = ticker_dir.name.upper()
-
-        for doctype_dir in sorted(ticker_dir.iterdir()):
-            if not doctype_dir.is_dir():
+    # --- Path 1: EDGAR full-submission.txt directory tree ---
+    if RAW_DIR.exists():
+        for ticker_dir in sorted(RAW_DIR.iterdir()):
+            if not ticker_dir.is_dir():
                 continue
-            doc_type = doctype_dir.name.upper()
+            ticker = ticker_dir.name.upper()
 
-            for accession_dir in sorted(doctype_dir.iterdir()):
-                if not accession_dir.is_dir():
+            for doctype_dir in sorted(ticker_dir.iterdir()):
+                if not doctype_dir.is_dir():
                     continue
+                doc_type = doctype_dir.name.upper()
 
-                submission_file = accession_dir / "full-submission.txt"
-                if not submission_file.exists():
-                    logger.warning(f"  No full-submission.txt in {accession_dir.name}")
-                    continue
+                for accession_dir in sorted(doctype_dir.iterdir()):
+                    if not accession_dir.is_dir():
+                        continue
 
-                total += 1
-                result = process_filing(ticker, doc_type, accession_dir.name, submission_file)
+                    submission_file = accession_dir / "full-submission.txt"
+                    if not submission_file.exists():
+                        logger.warning(f"  No full-submission.txt in {accession_dir.name}")
+                        continue
 
-                if result:
-                    manifest.append(result)
-                    success += 1
-                else:
-                    failed += 1
+                    total += 1
+                    result = process_filing(ticker, doc_type, accession_dir.name, submission_file)
+
+                    if result:
+                        manifest.append(result)
+                        success += 1
+                    else:
+                        failed += 1
+
+    # --- Path 2: Plain HTML files dropped directly into data/raw/ ---
+    for html_file in sorted(RAW_BASE.glob("*.html")):
+        total += 1
+        result = process_direct_html(html_file)
+        if result:
+            manifest.append(result)
+            success += 1
+        else:
+            failed += 1
 
     manifest_path = EXTRACTED_DIR / "_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")

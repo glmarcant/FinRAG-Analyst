@@ -55,34 +55,84 @@ Rules you must follow:
 """
 
 
+# ── COMPANY DETECTION ──────────────────────────────────────────────────────────
+
+def detect_company(query: str) -> Optional[str]:
+    """Return company name if unambiguously mentioned in the query."""
+    q = query.lower()
+    if "apple" in q or "aapl" in q:
+        return "Apple"
+    if "tesla" in q or "tsla" in q:
+        return "Tesla"
+    if "jpmorgan" in q or "jp morgan" in q or "jpm" in q or "chase" in q:
+        return "JPMorgan"
+    return None
+
+
+# ── QUERY EXPANSION ────────────────────────────────────────────────────────────
+
+def expand_query(query: str, model: str = "gpt-4o-mini") -> str:
+    """
+    Use the LLM to rewrite the query with financial synonyms and alternative
+    phrasings, improving recall for embedding-based retrieval.
+    Apple's fiscal calendar offset makes this especially important.
+    """
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": (
+                "You are a financial search query expander. "
+                "Rewrite the user's query as a single expanded search string that includes: "
+                "synonyms (e.g. 'net income' → also 'profit, earnings, net earnings'), "
+                "alternative time references (e.g. 'last quarter of 2025' → also "
+                "'Q4 2025, Q1 2026, first quarter fiscal 2026, October December 2025'), "
+                "and both formal and informal phrasings. "
+                "Output only the expanded query string, nothing else."
+            )},
+            {"role": "user", "content": query},
+        ],
+        temperature=0.0,
+        max_tokens=128,
+    )
+    return response.choices[0].message.content.strip()
+
+
 # ── CORE FUNCTION ──────────────────────────────────────────────────────────────
 
 def answer(
     query: str,
-    top_k: int = 5,
+    top_k: int = 10,
     filter_company: Optional[str] = None,
     filter_doc_type: Optional[str] = None,
-    model: str = "gpt-4o-mini",    # cheap and fast for development
+    model: str = "gpt-4o-mini",
 ) -> dict:
     """
     Full RAG pipeline: retrieve → build prompt → LLM call → return answer + sources.
-
-    Returns:
-        {
-            "question": str,
-            "answer": str,
-            "sources": [{"company", "doc_type", "period", "section_title", 
-                         "element_type", "score", "text"}, ...]
-        }
+    ...
     """
-    # ── Step 1: Retrieve relevant chunks ──────────────────────────────────────
+    # ── Step 1: Expand query then retrieve relevant chunks ────────────────────
+    expanded = expand_query(query, model=model)
+    print(f"\nExpanded query: {expanded}")          # ← add
+    
+    effective_company = filter_company or detect_company(query)
+    print(f"Filter company: {effective_company}")   # ← add
+    
     chunks = retrieve(
-        query=query,
+        query=expanded,
         model=_model,
         top_k=top_k,
-        filter_company=filter_company,
+        filter_company=effective_company,
         filter_doc_type=filter_doc_type,
     )
+    # Prioritise table chunks (they contain the actual numbers) then by score
+    chunks = sorted(
+        chunks,
+        key=lambda c: (0 if c["metadata"]["element_type"] == "table" else 1, -c["score"])
+    )
+    
+    print(f"Chunks retrieved: {len(chunks)}")       # ← add
+    for i, c in enumerate(chunks, 1):               # ← add
+        print(f"  [{i}] {c['metadata']['period']} | {c['text'][:100]}")  # ← add
 
     if not chunks:
         return {
@@ -173,11 +223,10 @@ def print_result(result: dict):
 
 if __name__ == "__main__":
     test_questions = [
-        "What was Apple's total revenue in 2024?",
-        "What are Tesla's main risk factors?",
-        "What is JPMorgan's net income?",
-    ]
+        "What was Apple's net income for the last quarter of 2025?"
+        ]
+
 
     for question in test_questions:
-        result = answer(question, top_k=5)
+        result = answer(question, top_k=10)
         print_result(result)

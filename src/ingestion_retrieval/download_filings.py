@@ -9,6 +9,7 @@ Usage:
 """
 
 from sec_edgar_downloader import Downloader
+from pathlib import Path
 import os
 
 # ── Configuration ────────────────────────────────────────────────
@@ -27,8 +28,8 @@ COMPANIES = [
 NUM_10K = 2   # last 2 annual reports (~2 years of data)
 NUM_10Q = 4   # last 4 quarterly reports (~1 year of data)
 
-# Output folder
-OUTPUT_DIR = "./sec_filings"
+# Output folder — absolute path so the script works from any working directory
+OUTPUT_DIR = str(Path(__file__).resolve().parents[2] / "data/raw")
 # ─────────────────────────────────────────────────────────────────
 
 
