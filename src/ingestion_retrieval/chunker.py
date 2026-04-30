@@ -69,6 +69,32 @@ TICKER_TO_COMPANY = {
 RAW_DIR = PROJECT_ROOT / "data/raw/sec-edgar-filings"
 
 
+def _read_period_date(submission: Path) -> str:
+    """Read CONFORMED PERIOD OF REPORT from the SEC header (e.g. '20250331')."""
+    try:
+        with open(submission, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if "CONFORMED PERIOD OF REPORT" in line:
+                    return line.split(":")[-1].strip()
+                if line.startswith("<DOCUMENT>"):
+                    break
+    except Exception:
+        pass
+    return ""
+
+
+def _period_label(date_str: str, doc_type: str) -> str:
+    """Convert a raw YYYYMMDD date string to a human period label."""
+    if len(date_str) == 8:
+        year  = int(date_str[:4])
+        month = int(date_str[4:6])
+        if doc_type == "10-K":
+            return f"FY{year}"
+        quarter = (month - 1) // 3 + 1
+        return f"Q{quarter}-{year}"
+    return "Unknown"
+
+
 def discover_documents() -> list[tuple]:
     """
     Auto-discover all filings from data/raw/sec-edgar-filings/.
@@ -85,15 +111,12 @@ def discover_documents() -> list[tuple]:
             if not doctype_dir.is_dir():
                 continue
             doc_type = doctype_dir.name.upper()
-            # Lexicographic sort works here because accession numbers are zero-padded.
             for accession_dir in sorted(doctype_dir.iterdir()):
                 submission = accession_dir / "full-submission.txt"
                 if not submission.exists():
                     continue
-                year = "20" + accession_dir.name.split("-")[1]  # e.g. "23" → "2023"
-                # TODO: Q{year} is a placeholder — the actual quarter (Q1/Q2/Q3)
-                # cannot be derived from the accession number alone.
-                period = f"FY{year}" if doc_type == "10-K" else f"Q{year}"
+                date_str = _read_period_date(submission)
+                period   = _period_label(date_str, doc_type)
                 docs.append((company, doc_type, period, str(submission)))
     return docs
 
@@ -461,6 +484,24 @@ def run_pipeline(inspect_only: bool = False, build_baseline: bool = False):
     if not docs:
         print("\n[!] No documents found in data/raw/sec-edgar-filings/ and none configured.\n")
         return
+
+    if not inspect_only:
+        # Clear stale chunks and indexes before rebuilding
+        chunks_dir = Path(CONFIG["chunks_dir"])
+        if chunks_dir.exists():
+            removed = list(chunks_dir.glob("*.json"))
+            for f in removed:
+                f.unlink()
+            if removed:
+                print(f"Deleted {len(removed)} old chunk file(s).")
+
+        index_dir = Path(CONFIG["index_dir"])
+        if index_dir.exists():
+            import shutil
+            for d in index_dir.iterdir():
+                if d.is_dir():
+                    shutil.rmtree(d, ignore_errors=True)
+            print("Cleared old indexes.")
 
     print(f"\nLoading embedding model: {CONFIG['embedding_model']}")
     model = SentenceTransformer(CONFIG["embedding_model"])
