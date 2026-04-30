@@ -10,8 +10,15 @@ faiss-cpu>=1.7.4
 # SEC Filing Download
 sec-edgar-downloader>=0.4.0
 
+# HTTP
+requests>=2.31.0
+
 # Document Parsing
 beautifulsoup4>=4.12.0
+unstructured[html]>=0.13.0
+
+# Vector Store (optional backend)
+chromadb>=0.5.0
 pypdf>=4.0.0
 pdfplumber>=0.10.0
 
