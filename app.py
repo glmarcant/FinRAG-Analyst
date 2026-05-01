@@ -660,7 +660,7 @@ with right:
 
     # Input
     query_input = st.text_area(
-        label="",
+        label="Query",
         value=st.session_state.query,
         placeholder="e.g. What was Apple's gross margin in FY2024?",
         height=80,
